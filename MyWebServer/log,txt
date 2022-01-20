@@ -1,0 +1,28 @@
+root@iZwz9eojvzsrz78f673t51Z:/home/shang/code/Tiny_Web_Server/MyWebServer# ./server 3000
+create the 0th thread
+create the 1th thread
+create the 2th thread
+create the 3th thread
+create the 4th thread
+create the 5th thread
+create the 6th thread
+create the 7th thread
+number is 1
+监听到新连接
+number is 1
+监听到新连接
+number is 1
+非阻塞读数据
+
+GET / HTTP/1.1
+Host: 120.77.3.164:3000
+Connection: keep-alive
+Cache-Control: max-age=0
+Upgrade-Insecure-Requests: 1
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36 Edg/96.0.1054.62
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9
+Accept-Encoding: gzip, deflate
+Accept-Language: zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6
+
+
+number is 1
