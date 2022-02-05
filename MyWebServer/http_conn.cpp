@@ -1,7 +1,7 @@
 #include "http_conn.h"
 
 //网站根目录
-const char *doc_root = "/home/shang/code/Tiny_Web_Server/MyWebServer/resources";
+const char *doc_root = "/home/shang/code/Tiny_Web_Server/github/MyTinyWebServer/MyWebServer/resources";
 
 // 定义HTTP响应的一些状态信息
 const char* ok_200_title = "OK";
@@ -38,6 +38,13 @@ void addfd(int epollfd, int fd, bool one_shot)
     setnonblocking(fd);
 }
 
+//从epoll中移除监听的文件描述符
+void removefd(int epollfd, int fd)
+{
+    epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, 0);
+    close(fd);
+}
+
 //修改文件描述符,对应之前设置的EPOLLONESHOT
 //等到该线程处理完事件后,此socket不会被epoll_wait返回(不触发事件),所以需要重新设置
 void modfd(int epollfd, int fd, int ev)
@@ -48,11 +55,7 @@ void modfd(int epollfd, int fd, int ev)
     epoll_ctl( epollfd, EPOLL_CTL_MOD, fd, &event );
 }
 
-void removefd(int epollfd, int fd)
-{
-    epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, 0);
-    close(fd);
-}
+
 
 //客户数量初始化
 int http_conn::m_user_count = 0;
@@ -96,7 +99,7 @@ void http_conn::init()
     m_url = nullptr;
     m_version = nullptr;
     m_host = 0;
-    m_linger = false;   // 默认不保持链接  Connection : keep-alive保持连接
+    m_linger = true;   // 默认不保持链接  Connection : keep-alive保持连接
 
     bzero(m_read_buf, READ_BUFFER_SIZE);
     bzero(m_write_buf, READ_BUFFER_SIZE);
@@ -114,14 +117,14 @@ void http_conn::close_conn()
     }
 }
 
+//循环读取客户数据，直到无数据可读或者对方关闭连接
 bool http_conn::read()
 {
-    printf("非阻塞读数据\n");
     if (m_read_index >= READ_BUFFER_SIZE) {
         printf("读入数据超出缓冲区\n");
         return false;
     }
-    int bytes_read = 0;
+    
     /*
     ET模式下使用非阻塞文件描述符读取文件
     listenfd不需要考虑阻塞非阻塞
@@ -130,27 +133,27 @@ bool http_conn::read()
     因为是ET模式,只会触发一次,所以一次就要读完所有数据,我们需要加一个循环
     加嵌套循环后会发生另一个问题
     数据读完后,阻塞IO会一直等待对方写数据,停在这里,这个时候主线程阻塞了,如果有新的客户连接是无法处理的
-    调成非阻塞IO就可以了,因为非阻塞 IO 如果没有数据可读时，会立即返回，并设置 errno。这里我们根据 EAGAIN 和 EWOULDBLOCK 来判断数据是否全部读取完毕了，如果读取完毕，就会正常退出循环了。
+    调成非阻塞IO就可以了,因为非阻塞 IO 如果没有数据可读时，会立即返回，并设置 errno。
+    这里我们根据 EAGAIN 和 EWOULDBLOCK 来判断数据是否全部读取完毕了，如果读取完毕，就会正常退出循环了。
     */
-    
+    int bytes_read = 0;
     while (true)
     {
         bytes_read = recv(m_sockfd, m_read_buf + m_read_index, READ_BUFFER_SIZE - m_read_index, 0);
         if (bytes_read == -1) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                //正常读完数据的情况
+                //正常读完数据的情况,此时退出循环
                 break;
             }
             return false;
-        } else if (bytes_read == 0) {
+        } else if (bytes_read == 0) { //对方关闭连接
             return false;
         } else {
             //已经读取数据的标记向后移动
             m_read_index += bytes_read;
         }
     }
-    //测试数据,我们读到的HTTP报文
-    printf("%s\n", m_read_buf);
+    printf("%s", m_read_buf);
     return true;
 }
 
@@ -158,6 +161,7 @@ bool http_conn::read()
 bool http_conn::write()
 {
     int temp = 0;
+    
     if (bytes_to_send == 0) {
         //将要发送的字节为0,这一次响应结束
         //写事件已经结束,需要修改文件描述符connfd为监视读事件,oneshot让epoll_wait只响应事件一次
@@ -176,39 +180,40 @@ bool http_conn::write()
             // 如果TCP写缓冲没有空间，则等待下一轮EPOLLOUT事件，虽然在此期间，
             // 服务器无法立即接收到同一客户的下一个请求，但可以保证连接的完整性。
             if (errno == EAGAIN) {
-                printf("分散写\n");
+                printf("TCP写缓冲空间不够,再重新注册写事件一次\n");
                 modfd(m_epollfd, m_sockfd, EPOLLOUT);
                 return true;
             }
             unmap();
             return false;
         }
-    }
+    
 
-    bytes_have_send += temp;
-    bytes_to_send -= temp;
+        bytes_have_send += temp;
+        bytes_to_send -= temp;
 
-    if (bytes_have_send >= m_iv[0].iov_len) {
-        m_iv[0].iov_len = 0;
-        m_iv[1].iov_base = m_file_address + (bytes_have_send - m_write_index);
-        m_iv[1].iov_len = bytes_to_send;
-    }
-    else {
-        m_iv[0].iov_base = m_write_buf + bytes_have_send;
-        m_iv[0].iov_len = m_iv[0].iov_len - temp;
-    }
+        if (bytes_have_send >= m_iv[0].iov_len) {
+            m_iv[0].iov_len = 0;
+            m_iv[1].iov_base = m_file_address + (bytes_have_send - m_write_index);
+            m_iv[1].iov_len = bytes_to_send;
+        }
+        else {
+            m_iv[0].iov_base = m_write_buf + bytes_have_send;
+            m_iv[0].iov_len = m_iv[0].iov_len - temp;
+        }
 
-    if (bytes_to_send <= 0) {
-        //没有数据要发送
-        unmap();
-        modfd(m_epollfd, m_sockfd, EPOLLIN);
+        if (bytes_to_send <= 0) {
+            //没有数据要发送
+            unmap();
+            modfd(m_epollfd, m_sockfd, EPOLLIN);
 
-        //如果是长连接
-        if (m_linger) {
-            init();
-            return true;
-        } else {
-            return false;
+            //如果是长连接
+            if (m_linger) {
+                init();
+                return true;
+            } else {
+                return false;
+            }
         }
     }
 }
@@ -223,7 +228,6 @@ process_read通过有限状态机分析HTTP请求报文
 void http_conn::process()
 {
     //解析HTTP请求
-    printf("process_read()开始解析请求\n");
     HTTP_CODE read_ret = process_read();
     //请求不完整，需要继续读取客户数据
     if (read_ret == NO_REQUEST) {
@@ -233,14 +237,14 @@ void http_conn::process()
     }
     //生成响应报文
     //传入read_ret是因为我们要根据读HTTP的情况来进行不同的操作
-    printf("process_write()开始解析请求\n");
     bool write_ret = process_write(read_ret);
-    printf("the write_ret is %d\n");
     if (!write_ret) {
         close_conn();
     }
     //注册写事件
     modfd(m_epollfd, m_sockfd, EPOLLOUT);
+    printf("the write_ret is %d\n");
+
 }
 
 //解析具体的一行
@@ -380,7 +384,7 @@ http_conn::HTTP_CODE http_conn::process_read()
         //return m_read_buf + m_start_line
         text = get_line();
         m_start_line = m_checked_index; //此时m_checked_index位置为下一行开始位置
-        printf("get 1 http line:%s\n", text);
+        printf("%s\n", text);
 
         switch (m_check_state)
         {
@@ -557,8 +561,6 @@ bool http_conn::process_write(HTTP_CODE ret)
             //更新已发送字节大小
             bytes_to_send = m_write_index + m_file_stat.st_size;
             
-            //测试
-            printf("测试语句:响应报文\n%s", m_write_buf);
             return true;
         }
         default:
