@@ -12,7 +12,7 @@
 #include "threadpool.h"
 #include "timer.h"
 
-static const int TIMESLOT = 2;
+static const int TIMESLOT = 10;                     //定时时间
 static int pipefd[2];                               //创建管道发送接收信号
 static const int MAX_EVENT_NUMBER = 10000;          //epoll最多监视的事件数目
 const int MAX_FD_NUMBER = 65535;                    //最大文件描述符数量
@@ -62,6 +62,11 @@ void cb_func(client_data *user_data)
     assert(user_data);
     close(user_data->sockfd);
     printf( "close fd %d\n", user_data->sockfd );
+}
+
+bool listen_event(int epollfd, int fd)
+{
+
 }
 
 int main(int argc, char* argv[])
@@ -138,17 +143,16 @@ int main(int argc, char* argv[])
         int number = epoll_wait(epollfd, events, MAX_FD_NUMBER, -1);
         //errno 4:异步非阻塞IO,不确认是否收到,发送缓冲区可能会满,就释放这个信号,让你再试一次
         if ((number < 0) && (errno != EINTR)) {
-            return -1;
             printf("epoll failure\n");
             break;
         }
-        
+
         for (int i = 0; i < number; i++) {
             int sockfd = events[i].data.fd;
            
             //如果是监听文件描述符
             if (sockfd == listenfd) {
-                printf("测试语句:sockfd == listenfd 监听到新连接\n\n");
+                printf("测试语句:listenfd 监听到新连接\n\n");
                 struct sockaddr_in client_address;
                 socklen_t client_address_length = sizeof(client_address);
                 int connfd = accept(listenfd, (struct sockaddr*)&client_address, &client_address_length);
@@ -167,6 +171,7 @@ int main(int argc, char* argv[])
                 //定时器相关
                 m_users_timer[connfd].address = client_address;
                 m_users_timer[connfd].sockfd = connfd;
+                
                 //创建定时器
                 util_timer* timer = new util_timer;
                 timer->user_data = &m_users_timer[connfd];  //该定时器绑定该客户端

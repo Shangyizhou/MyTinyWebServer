@@ -15,6 +15,7 @@ struct client_data
     char buf[ BUFFER_SIZE ];    //客户端读缓存
     util_timer* timer;          //客户端定时器
 };
+
 // 定时器类
 class util_timer
 {

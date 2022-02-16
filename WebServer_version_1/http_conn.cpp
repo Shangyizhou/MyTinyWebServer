@@ -99,7 +99,7 @@ void http_conn::init()
     m_url = nullptr;
     m_version = nullptr;
     m_host = 0;
-    m_linger = true;   // 默认不保持链接  Connection : keep-alive保持连接
+    m_linger = true;   // 默认不保持长连接  Connection : keep-alive保持连接
 
     bzero(m_read_buf, READ_BUFFER_SIZE);
     bzero(m_write_buf, READ_BUFFER_SIZE);
