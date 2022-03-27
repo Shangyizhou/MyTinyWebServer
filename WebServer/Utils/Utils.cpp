@@ -1,6 +1,7 @@
 #include "Utils.h"
 
 int* Utils::pipefd_ = nullptr;
+int Utils::epollfd_ = -1;
 
 /*
 SetNonBlocking()
@@ -77,4 +78,3 @@ void Utils::AddSig(int sig, void(handler)(int)) {
     sigfillset(&sa.sa_mask);
     assert(sigaction(sig, &sa, NULL) != -1);
 }
-

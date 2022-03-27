@@ -17,8 +17,8 @@ int HttpConn::epollfd_ = -1;    //初始化epollfd为-1
 //关闭连接,减少客户数量,关闭连接
 void HttpConn::CloseConn(bool real_close)
 {
-    if (!sockfd_) {
-        printf("close %d\n", sockfd_);
+    if (sockfd_) {
+        printf("the write_ret is false close %d\n", sockfd_);
         //删除监视的事件
         utils_.RemoveFd(epollfd_, sockfd_);
         sockfd_ = -1;
@@ -68,7 +68,6 @@ bool HttpConn::ReadOnce()
         // 更新指针
         read_idx_ += bytes_read;
     }
-    printf("%s", read_buf_);
     
     return true;
 }
@@ -76,8 +75,6 @@ bool HttpConn::ReadOnce()
 //写将响应报文内容写入connfd中
 bool HttpConn::Write()
 {
-    printf("向客户端写响应报文\n");
-
     // 如果数据发送完毕,那么写事件完成,下一次注册读事件
     if (bytes_to_send_ == 0) {
         utils_.ModFd(epollfd_, sockfd_, EPOLLIN);
@@ -90,7 +87,8 @@ bool HttpConn::Write()
     //非阻塞connfd,一次循环写完
     while (true) {
         temp = writev(sockfd_, iv_, iv_count_);
-        if (temp <= -1) {
+        //没有成功发送数据
+        if (temp < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 utils_.ModFd(epollfd_, sockfd_, EPOLLOUT);
                 return true;
@@ -103,7 +101,7 @@ bool HttpConn::Write()
         bytes_have_send_ += temp;
         bytes_to_send_ -= temp;
 
-        //因为可能多次发送,所以每次都要更新发送数据的其实位置和剩余发送数据大小
+        //因为可能多次发送,所以每次都要更新发送数据的起始位置和剩余发送数据大小
         //第一个iovec头部信息的数据已发送完，发送第二个iovec数据
         if (bytes_to_send_ >= iv_[0].iov_len)
         {
@@ -114,7 +112,7 @@ bool HttpConn::Write()
         else 
         {
             iv_[0].iov_base = write_buf_ + bytes_have_send_;
-            iv_[0].iov_len = iv_[0].iov_len - temp;
+            iv_[0].iov_len = iv_[0].iov_len - bytes_have_send_;
         }
 
         //无数据发送了
@@ -122,7 +120,17 @@ bool HttpConn::Write()
             UnMap();
             //修改为监视读事件
             utils_.ModFd(epollfd_, sockfd_, EPOLLIN);
-            return true;
+
+            //如果长连接,重新初始化
+            if (linger_) 
+            {
+                Init();
+                return true;
+            } 
+            else 
+            {
+                return false;
+            }
         }
     }
 }
@@ -195,6 +203,8 @@ HttpConn::HTTP_CODE HttpConn::ParseRequestLine(char* text)
     char *method = text;
     if ( strcasecmp(method, "GET") == 0 )  // 忽略大小写比较
         method_ = GET;
+    else if ( strcasecmp(method, "POST") == 0)
+        method_ = POST;
     else 
         return BAD_REQUEST;
     
@@ -330,8 +340,8 @@ HttpConn::HTTP_CODE HttpConn::ProcessRead()
     {
         //得到一行字符串
         text = GetLine();
-        printf("%s\n", text);
 
+        //更新行开始处
         start_line_ = checked_idx_;
 
         //主状态机的三种状态转移逻辑
@@ -355,9 +365,12 @@ HttpConn::HTTP_CODE HttpConn::ProcessRead()
                     return DoRequest();
                 break;
             }     
+            //Post有请求体
             case CHECK_STATE_CONTENT:
             {
+                //解析消息体
                 ret = ParseContent(text);
+                //完整解析POST请求后，跳转到报文响应函数
                 if (ret == GET_REQUEST)
                     return DoRequest();
                 
@@ -381,7 +394,7 @@ bool HttpConn::AddResponse(const char *format, ...)
 
     //将数据format从可变参数列表写入缓冲区写，返回写入数据的长度
     int len = vsnprintf(write_buf_ + write_idx_, WRITE_BUFFER_SIZE - 1 - write_idx_, format, arg_list);
-    
+
     //如果写入的数据长度超过缓冲区剩余空间，则报错
     if (len >= (WRITE_BUFFER_SIZE - 1 - write_idx_))
     {
@@ -395,8 +408,6 @@ bool HttpConn::AddResponse(const char *format, ...)
     
     //清空可变参列表
     va_end(arg_list);
-
-    
 
     return true;
         
@@ -429,7 +440,7 @@ bool HttpConn::AddContentType()
 //添加连接状态，通知浏览器端是保持连接还是关闭
 bool HttpConn::AddLinger()
 {
-    return AddResponse("Connection:%s\r\n", (linger_ == true));
+    return AddResponse("Connection:%s\r\n", (true == linger_) ? "keep-alive" : "close");
 }
 
 //添加空行
@@ -469,6 +480,7 @@ bool HttpConn::ProcessWrite(HTTP_CODE ret)
         //文件存在:200
         case FILE_REQUEST:
         {
+            printf("PROCESSWRIET RETURN FILE_REQUEST\n");
             AddStatueLine(200, ok_200_title);
             //如果请求的资源存在
             if (file_stat_.st_size != 0)
@@ -483,7 +495,6 @@ bool HttpConn::ProcessWrite(HTTP_CODE ret)
                 iv_count_ = 2;
                 //发送的全部数据为响应报文头部信息和文件大小
                 bytes_to_send_ = write_idx_ + file_stat_.st_size;
-                printf("the write_ret is %d\n", bytes_to_send_);
                 return true;
             }
             else {
@@ -497,6 +508,12 @@ bool HttpConn::ProcessWrite(HTTP_CODE ret)
         default:
             return false;
     }
+    //除FILE_REQUEST状态外，其余状态只申请一个iovec，指向响应报文缓冲区
+    iv_[0].iov_base = write_buf_;
+    iv_[0].iov_len = write_idx_;
+    iv_count_ = 1;
+    bytes_to_send_ = write_idx_;
+    return true;
 }
 
 /*
@@ -506,6 +523,8 @@ bool HttpConn::ProcessWrite(HTTP_CODE ret)
 */
 void HttpConn::Process()
 {   
+    printf("The HTTP request is \n%s", read_buf_); //测试读取到的数据
+
     HTTP_CODE read_ret = ProcessRead();
 
     //没有读完数据情况
@@ -514,10 +533,10 @@ void HttpConn::Process()
         utils_.ModFd(epollfd_, sockfd_, EPOLLIN);
         return;
     }
-    
+
     //调用 ProcessWrite 完成报文响应，我们传入了读函数返回值作为判断
     bool write_ret = ProcessWrite(read_ret);
-    printf("the write_ret is %d\n", write_ret);
+    printf("The write_buf_ response is \n %s\n", write_buf_);
     if (!write_ret) {
         CloseConn();
     }
@@ -527,10 +546,15 @@ void HttpConn::Process()
 
 void HttpConn::Init()
 {       
+    timer_flag_ = 0;
+    event_finish_ = 0;
+
     //分析报文行所需要数据
     read_idx_ = 0;      //已读数据的下一位
     checked_idx_ = 0;   //当前已检查数据
     start_line_ = 0;    //当前行位置
+    
+    write_idx_ = 0;     //修改
     
     //主状态机及其分析对应变量
     check_state_ = CHECK_STATE_REQUESTLINE;
@@ -539,6 +563,7 @@ void HttpConn::Init()
     host_ = 0;
     version_ = 0;
     content_length_ = 0;    
+    linger_ = false;
 
     // 对读、写、文件名缓冲区初始化为'\0'
     memset(read_buf_, '\0', READ_BUFFER_SIZE);

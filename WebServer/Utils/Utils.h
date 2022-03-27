@@ -22,12 +22,6 @@
 #include <sys/uio.h>
 #include <map>
 
-struct ClientData {
-    struct sockaddr_in address;
-    int fd;
-    
-};
-
 class Utils
 {
 public:
@@ -51,8 +45,8 @@ public:
     void ModFd(int epollfd, int fd, int ev);
 
 public:
-    static int *pipefd_;
-
+    static int *pipefd_;    //信号的管道
+    static int epollfd_;    //epoll文件描述符
 };
 
 #endif

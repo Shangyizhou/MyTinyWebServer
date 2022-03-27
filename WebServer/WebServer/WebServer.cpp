@@ -1,15 +1,22 @@
 #include "WebServer.h"
 
-WebServer::WebServer(int port, int thread_nums = 8, int max_queue_nums = MAX_EVENT_NUMBER)
+/*
+构造函数
+    传入基本参数,端口号,线程数,最大请求数
+    为储存客户端信息数组分配内存
+    为定时器数组分配内存
+*/
+WebServer::WebServer(int port, int thread_nums, int max_queue_nums)
     : port_(port), thread_nums_(thread_nums), max_queue_nums_(max_queue_nums)
 {
     //储存客户端连接情况
     users_ = new HttpConn[MAX_FD_NUMBER];
 
-    //定时器
+    //定时器相关结构
     users_timer_ = new ClientData[MAX_FD_NUMBER];
     
-    printf("printf info:    WebServer 构造函数调用\n");
+    //为定时器分配内存
+    timer_manager_ = new TimerManager;
 }
 
 /*
@@ -27,15 +34,17 @@ WebServer::~WebServer()
     close(pipefd_[1]);
     delete[] users_;
     delete[] users_timer_;
+    delete timer_manager_;
     delete thread_pool_;
-
-    printf("printf info:    WebServer 析构函数调用\n");
 }
 
+/*
+CreateThreadPool() 
+    创建线程池
+*/
 void WebServer::CreateThreadPool() 
 {
     thread_pool_ = new ThreadPool<HttpConn>(thread_nums_, max_queue_nums_);
-    printf("printf info:    创建线程池\n");
 }
 
 /*
@@ -44,16 +53,14 @@ ListenEvents()
     创建监听套接字
     设置端口复用
     创建epoll对象,并监视listenfd的EPOLLIN事件(设置非阻塞)
-
+    创建定时器相关数组
 */
 void WebServer::ListenEvents() 
 {
+    //注册信号
     utils_.AddSig(SIGPIPE, SIG_IGN);
     utils_.AddSig(SIGALRM, utils_.SigHandler);
     utils_.AddSig(SIGTERM, utils_.SigHandler);
-
-    //每隔TIMESLOT时间触发SIGALRM信号
-    // alarm(TIMESLOT);
 
     listenfd_ = socket(AF_INET, SOCK_STREAM, 0);
     assert(listenfd_ != -1);
@@ -67,16 +74,17 @@ void WebServer::ListenEvents()
     int reuse_flag = 1;
     //允许重用本地地址和端口
     setsockopt(listenfd_, SOL_SOCKET, SO_REUSEADDR, &reuse_flag, sizeof(reuse_flag));
+    
     // 给套接字绑定地址
     int ret = bind(listenfd_, (struct sockaddr *)&address, sizeof(address));
     assert(ret != -1);
+    
     // 监听套接字
     ret = listen(listenfd_, 5);
     assert(ret != -1);
 
     // 这里是为了监听套接字以此来监听客户连接情况
     //epoll创建内核事件表
-    epoll_event events[MAX_EVENT_NUMBER];
     epollfd_ = epoll_create(5);
     assert(epollfd_ != -1);
 
@@ -90,15 +98,15 @@ void WebServer::ListenEvents()
     ret = socketpair(PF_UNIX, SOCK_STREAM, 0, WebServer::pipefd_);
     utils_.AddFd(epollfd_, pipefd_[0], false);
     
-    //储存用户信息
-    // users_ = new ClientData[MAX_FD_NUMBER];
-    
     //犯了一个错误,我直接将数组进行了赋值,这赋值的是地址而不是数组
     //所以把Utils::pipefd设置为指针比较好，毕竟数组名就是地址
     Utils::pipefd_ = pipefd_;
-    
+    Utils::epollfd_ = epollfd_;    
     //HttpConn代表客户端信息,并且会有一个初始化函数,客户端也需要监视是否有数据,所以也要上树
     HttpConn::epollfd_ = epollfd_;  
+
+    //每隔TIMESLOT时间触发SIGALRM信号
+    alarm(TIMESLOT);
 }
 
 //处理事件循环中的新连接事件
@@ -113,19 +121,37 @@ bool WebServer::DealClientData()
         //退处循环,一种是一开始就接受不到连接,另一种是处理完了所有连接
         if (connfd < 0) {
             printf("accept failure and the errno is %d\n", errno);
-            break;
+            return false;
         }
         else if (HttpConn::user_count_ >= MAX_FD_NUMBER) {
-            perror("Too many connections\n");
+            perror("Internal server busy\n");
             return false;
         }
         else {
             //初始化客户端信息
-            printf("初始化客户端信息\n");
             users_[connfd].Init(connfd, client_addrss);
+            SetTimer(connfd, client_addrss);
         }
     }
-    return true;
+}
+
+/*
+SetTimer()
+    定时器内有ClientData结构,需要传入connfd client_address来初始化
+
+*/
+void WebServer::SetTimer(int connfd, struct sockaddr_in client_address)
+{
+    users_timer_[connfd].address = client_address;
+    users_timer_[connfd].sockfd = connfd;
+    
+    TimerNode* timer = new TimerNode;
+    timer->user_data_ = &users_timer_[connfd];
+    timer->cb_func = CbFunc;                    //设置定时器回调函数
+    time_t cur = time(NULL);                    //设置定时事件
+    timer->expire = cur + 3 * TIMESLOT; 
+    users_timer_[connfd].timer = timer;         //该连接更新其定时器成员
+    timer_manager_->AddTimerNode(timer);        //将该定时器插入定时器管理结构
 }
 
 bool WebServer::DealWithSignal()
@@ -160,19 +186,99 @@ bool WebServer::DealWithSignal()
 
     return true;
 }
+/*
+AddTimer()
+    当有读写事件产生时,该客户端活跃
+    增加定时时间
+*/
+void WebServer::AddTimer(TimerNode* timer)
+{
+    time_t cur = time(NULL);
+    timer->expire = cur + 3 * TIMESLOT; //增加定时器事件
+    timer_manager_->AdjustTimer(timer); //调整定时器链表
+}
 
 void WebServer::DealWithRead(int sockfd)
 {
     //Reactor:主线程只负责监视,工作线程读写并处理数据
-    printf("读事件\n");
+    TimerNode* timer = users_timer_[sockfd].timer;
+    if (timer != NULL) {
+        AddTimer(timer);
+    }
+    //若监测到读事件，将该事件放入请求队列
     thread_pool_->Append(&users_[sockfd], 0);
+    while (true)
+    {
+        //完成事件判断
+        if (1 == users_[sockfd].event_finish_) {
+            //长连接和短连接判断
+            if (1 == users_[sockfd].timer_flag_ ) {
+                printf("读取数据失败,处理定时器和fd\n");
+                DeleteTimer(users_timer_[sockfd].timer, sockfd);
+                timer_manager_->DelTimer(users_timer_[sockfd].timer);
+                users_[sockfd].timer_flag_ = 0;
+            }
+            users_[sockfd].event_finish_ = 0; //事件重新标记成未完成
+            break;
+        }
+    }
+
 }
 
 void WebServer::DealWithWrite(int sockfd)
 {
+    TimerNode* timer = users_timer_[sockfd].timer;
+    if (timer != NULL) {
+        AddTimer(timer);
+    }
     thread_pool_->Append(&users_[sockfd], 1);
+
+    //需要先直到是否完成事件,没有完成事件就循环等待
+    //完成事件后再判断是长连接还是短连接,短连接移除定时器关闭连接删除epoll注册对象
+    
+    while (true)
+    {
+        //完成事件判断
+        if (1 == users_[sockfd].event_finish_) {
+            //长连接和短连接判断
+            if (1 == users_[sockfd].timer_flag_) {
+                printf("短链接,关闭定时器\n");
+                DeleteTimer(users_timer_[sockfd].timer, sockfd);
+                users_[sockfd].timer_flag_ = 0;
+            }
+            users_[sockfd].event_finish_ = 0; //事件重新标记成未完成
+            break;
+        }
+    }
 }
 
+/*
+DeleteTimer
+    调用回调函数,从epoll对象删除注册事件
+    在定时器管理容器中删除该定时器
+*/
+void WebServer::DeleteTimer(TimerNode* timer, int sockfd)
+{
+    printf("删除定时器, 关闭文件描述符%d\n", sockfd);
+    //调用回调函数,从epoll对象删除注册事件
+    timer->cb_func(&users_timer_[sockfd]);
+    //在定时器管理容器中删除该定时器
+    if (timer) {
+        timer_manager_->DelTimer(timer);
+    }
+}
+
+void WebServer::TimerHandle()
+{
+    printf("timer tick!\n");
+    timer_manager_->Tick();
+    alarm(TIMESLOT);
+}
+
+/*
+LoopEvents()
+    事件循环
+*/
 void WebServer::LoopEvents()
 {
     timeout_ = false;
@@ -183,19 +289,20 @@ void WebServer::LoopEvents()
         if (number < 0 && errno != EINTR) { //在非中断的方式下返回值小于0
             printf("epoll failure\n");
         } 
-        for (int i = 0; i < number; i++) {
+        for (int i = 0; i < number; i++) 
+        {
             int sockfd = events_[i].data.fd;
             //如果监听到新的客户连接
             if (sockfd == listenfd_) {
-                printf("listenfd 监听到链接\n");
                 bool flag = DealClientData();
-                if (false == flag) 
+                if (false == flag) //false说明处理完了连接
                     continue;
             }
-            else if (events_[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+            else if (events_[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) //客户端
             {
-                //服务器端关闭连接，移除对应的定时器
-
+                TimerNode* timer = users_timer_[sockfd].timer;
+                DeleteTimer(timer, sockfd);
+                printf("监听到异常事件,客户端关闭了连接, errno = %d\n", errno);
             }
             //如果是信号事件
             else if ((sockfd == pipefd_[0]) && events_[i].events & EPOLLIN) {
@@ -215,8 +322,11 @@ void WebServer::LoopEvents()
             }
         } 
         //如果定时事件已到
-        if (timeout_) {
-
+        if (timeout_) 
+        {
+            TimerHandle();
+            timeout_ = false;
         }
     }
 }
+

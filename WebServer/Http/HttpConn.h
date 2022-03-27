@@ -24,7 +24,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-#include "Utils.h"
+#include "../Utils/Utils.h"
 
 
 
@@ -50,28 +50,28 @@ public:
     //主状态机的状态
     enum CHECK_STATE
     {
-        CHECK_STATE_REQUESTLINE = 0,
-        CHECK_STATE_HEADER,
-        CHECK_STATE_CONTENT
+        CHECK_STATE_REQUESTLINE = 0,    //检查请求行
+        CHECK_STATE_HEADER,             //检查请求头
+        CHECK_STATE_CONTENT             //检查请求体
     };
     //报文解析的结果
     enum HTTP_CODE
     {
-        NO_REQUEST,
-        GET_REQUEST,
-        BAD_REQUEST,
-        NO_RESOURCE,
+        NO_REQUEST,         //回复NO_REQUEST继续往后处理
+        GET_REQUEST,        //GET请求
+        BAD_REQUEST,        //语法错误
+        NO_RESOURCE,        //无请求资源
         FORBIDDEN_REQUEST,
-        FILE_REQUEST,
-        INTERNAL_ERROR,
-        CLOSED_CONNECTION
+        FILE_REQUEST,       //请求资源
+        INTERNAL_ERROR,     //内部错误
+        CLOSED_CONNECTION   //关闭连接
     };
     //从状态机的状态
     enum LINE_STATUS
     {
-        LINE_OK = 0,
-        LINE_BAD,
-        LINE_OPEN
+        LINE_OK = 0,    //行解析成功
+        LINE_BAD,       //语法错误
+        LINE_OPEN       //未获取到一行
     };
 
 public:
@@ -126,6 +126,8 @@ public:
 public:
     static int epollfd_;    //我们还需要监视connfd的读事件,所以也需要上树
     static int user_count_; //客户端总数
+    int event_finish_;      //读写事件是否完成标志
+    int timer_flag_;        //标志为1,代表要移除定时器和关闭fd
 
 public:
     Utils utils_;            //工具类

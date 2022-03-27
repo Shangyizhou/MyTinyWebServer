@@ -8,8 +8,7 @@
 #include <semaphore.h>
 
 #include "Locker.h"
-
-#include "HttpConn.h"
+#include "../Http/HttpConn.h"
 
 // 线程池类，将它定义为模板类是为了代码复用，模板参数T是任务类
 template<typename T>
@@ -163,12 +162,25 @@ void ThreadPool< T >::ThreadRun() {
         }
         
         if (0 == event_flag_) {
-            request->ReadOnce();
-            //线程对HTTP请求进行处理
-            request->Process();
+            if (request->ReadOnce()) {
+                //线程对HTTP请求进行处理
+                request->Process();
+                request->event_finish_ = 1;
+            }
+            else {
+                //读取失败
+                request->timer_flag_ = 1;
+                request->event_finish_ = 1;
+            }
         }
-        else if (1 == event_flag_) {
-            request->Write();
+        else if (1 == event_flag_) {            
+            if (request->Write()) { //长连接
+                request->event_finish_ = 1;
+            } else {//短连接
+                request->timer_flag_ = 1;
+                request->event_finish_ = 1;
+            }     
+                                            
         }
     }
 
